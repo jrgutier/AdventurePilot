@@ -49,6 +49,18 @@ TurnDirection = custom.ModelDataV2SP.TurnDirection
 
 IGNORED_SAFETY_MODES = (SafetyModel.silent, SafetyModel.noOutput)
 
+# Index into PERSONALITY_RANK_ORDER = aggressiveness rank (low = relaxed, high = veryAggressive).
+PERSONALITY_RANK_ORDER = [2, 1, 0, 3]
+PERSONALITY_TO_RANK = {p: i for i, p in enumerate(PERSONALITY_RANK_ORDER)}
+assert sorted(PERSONALITY_RANK_ORDER) == sorted(log.LongitudinalPersonality.schema.enumerants.values())
+
+
+def _step_personality_ranked(current: int, direction: int) -> int:
+  """Step current personality by ±1 rank along PERSONALITY_RANK_ORDER, clamped at endpoints."""
+  cur_rank = PERSONALITY_TO_RANK[current]
+  new_rank = max(0, min(len(PERSONALITY_RANK_ORDER) - 1, cur_rank + direction))
+  return PERSONALITY_RANK_ORDER[new_rank]
+
 
 class SelfdriveD(CruiseHelper):
   def __init__(self, CP=None, CP_SP=None):
@@ -172,6 +184,12 @@ class SelfdriveD(CruiseHelper):
     self.car_events_sp = CarSpecificEventsSP(self.CP, self.CP_SP)
 
     CruiseHelper.__init__(self, self.CP)
+
+  def _set_personality(self, new_personality: int) -> None:
+    if new_personality != self.personality:
+      self.personality = new_personality
+      self.params.put_nonblocking('LongitudinalPersonality', self.personality)
+      self.events.add(EventName.personalityChanged)
 
   def update_events(self, CS):
     """Compute onroadEvents from carState"""
@@ -449,14 +467,26 @@ class SelfdriveD(CruiseHelper):
 
     CruiseHelper.update(self, CS, self.events_sp, self.experimental_mode)
 
-    # decrement personality on distance button press
+    # personality on gapAdjustCruise:
+    #   - Rivian encodes direction inline on ButtonEvent.pressed
+    #     (pressed=True → +1 step, pressed=False → -1 step) to bypass the
+    #     cross-socket race that legacy `(p-1) % 4` fallback exposed.
+    #   - Other brands keep the legacy single-direction cycle on the release edge.
     if self.CP.openpilotLongitudinalControl:
-      if any(not be.pressed and be.type == ButtonType.gapAdjustCruise for be in CS.buttonEvents):
-        if not self.experimental_mode_switched:
-          self.personality = (self.personality - 1) % 3
-          self.params.put_nonblocking('LongitudinalPersonality', self.personality)
-          self.events.add(EventName.personalityChanged)
-        self.experimental_mode_switched = False
+      if self.CP.brand == 'rivian':
+        for be in CS.buttonEvents:
+          if be.type != ButtonType.gapAdjustCruise:
+            continue
+          if self.experimental_mode_switched:
+            self.experimental_mode_switched = False
+            continue
+          direction = +1 if be.pressed else -1
+          self._set_personality(_step_personality_ranked(self.personality, direction))
+      else:
+        if any(not be.pressed and be.type == ButtonType.gapAdjustCruise for be in CS.buttonEvents):
+          if not self.experimental_mode_switched:
+            self._set_personality((self.personality - 1) % 4)  # legacy cycle
+          self.experimental_mode_switched = False
 
     self.icbm.run(CS, self.sm['carControl'], self.sm['longitudinalPlanSP'], self.is_metric)
 
