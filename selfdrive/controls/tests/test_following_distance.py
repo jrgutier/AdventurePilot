@@ -4,7 +4,8 @@ from openpilot.common.parameterized import parameterized_class
 
 from cereal import log
 
-from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import get_safe_obstacle_distance, get_stopped_equivalence_factor, get_T_FOLLOW
+from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import get_safe_obstacle_distance, get_stopped_equivalence_factor, get_T_FOLLOW, \
+  get_jerk_factor
 from openpilot.selfdrive.test.longitudinal_maneuvers.maneuver import Maneuver
 
 
@@ -34,7 +35,8 @@ def run_following_distance_simulation(v_lead, t_end=100.0, e2e=False, personalit
                       [True, False], # e2e
                       [log.LongitudinalPersonality.relaxed, # personality
                        log.LongitudinalPersonality.standard,
-                       log.LongitudinalPersonality.aggressive],
+                       log.LongitudinalPersonality.aggressive,
+                       log.LongitudinalPersonality.veryAggressive],
                       [0,10,35])) # speed
 class TestFollowingDistance:
   def test_following_distance(self):
@@ -44,3 +46,9 @@ class TestFollowingDistance:
     err_ratio = 0.2 if self.e2e else 0.1
     abs_err_margin = 0.5 if v_lead > 0.0 else 1.15
     assert simulation_steady_state == pytest.approx(correct_steady_state, abs=err_ratio * correct_steady_state + abs_err_margin)
+
+
+class TestJerkFactorSafetyFloor:
+  def test_very_aggressive_jerk_factor_not_too_low(self):
+    """Jerk factor must stay above safety floor to ensure MPC convergence at stop."""
+    assert get_jerk_factor(log.LongitudinalPersonality.veryAggressive) >= 0.15
