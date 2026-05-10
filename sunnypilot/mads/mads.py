@@ -58,6 +58,7 @@ class ModularAssistiveDrivingSystem:
     self.unified_engagement_mode = self.params.get_bool("MadsUnifiedEngagementMode")
 
   def read_params(self):
+    self.enabled_toggle = self.params.get_bool("Mads")
     self.main_enabled_toggle = self.params.get_bool("MadsMainCruiseAllowed")
     self.unified_engagement_mode = self.params.get_bool("MadsUnifiedEngagementMode")
 
@@ -76,19 +77,6 @@ class ModularAssistiveDrivingSystem:
       return False
 
     return True
-
-  def block_unified_engagement_mode(self) -> bool:
-    # UEM disabled
-    if not self.unified_engagement_mode:
-      return True
-
-    if self.enabled:
-      return True
-
-    if self.selfdrive.enabled and self.selfdrive.enabled_prev:
-      return True
-
-    return False
 
   def get_wrong_car_mode(self, alert_only: bool) -> None:
     if alert_only:
@@ -158,7 +146,10 @@ class ModularAssistiveDrivingSystem:
       if self.pedal_pressed_non_gas_pressed(CS):
         self.events_sp.add(EventNameSP.pedalPressedAlertOnly)
 
-      if self.block_unified_engagement_mode():
+      # Block UEM when: UEM is off, MADS is already enabled (would be a no-op
+      # re-engage), or selfdrived was already enabled in the prior frame
+      # (avoids double-enable on the same engagement event).
+      if not self.unified_engagement_mode or self.enabled or (self.selfdrive.enabled and self.selfdrive.enabled_prev):
         self.events.remove(EventName.pcmEnable)
         self.events.remove(EventName.buttonEnable)
     else:
@@ -211,7 +202,6 @@ class ModularAssistiveDrivingSystem:
       return
 
     self.data_sample()
-
     self.update_events(CS)
 
     if not self.CP.passive and self.selfdrive.initialized:

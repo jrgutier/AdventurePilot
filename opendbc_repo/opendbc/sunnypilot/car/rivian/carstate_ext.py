@@ -19,6 +19,20 @@ MAX_SET_SPEED = 85 * CV.MPH_TO_MS
 MIN_SET_SPEED = 20 * CV.MPH_TO_MS
 
 
+def _append_button_event(ret: structs.CarState, *, pressed: bool, button_type: structs.CarState.ButtonEvent.Type) -> None:
+  """Append a ButtonEvent to ret.buttonEvents without losing existing entries.
+
+  ret.buttonEvents is a capnp builder list; iterating it yields readers tied to
+  the current allocation. Reassigning the list invalidates those readers, so a
+  naive `list(ret.buttonEvents) + [new]` corrupts the existing entries to
+  default values. Copy each existing entry through a fresh detached
+  ButtonEvent builder so the values survive the reassignment.
+  """
+  events = [structs.CarState.ButtonEvent(pressed=be.pressed, type=be.type) for be in ret.buttonEvents]
+  events.append(structs.CarState.ButtonEvent(pressed=pressed, type=button_type))
+  ret.buttonEvents = events
+
+
 class CarStateExt:
   def __init__(self, CP: structs.CarParams, CP_SP: structs.CarParamsSP):
     self.CP = CP
@@ -31,8 +45,9 @@ class CarStateExt:
     self.increase_counter = 0
     self.decrease_counter = 0
     self.stalk_down_counter = 0
+    self.prev_user_adas_req: int = 0
 
-  def update_longitudinal_upgrade(self, ret: structs.CarState, can_parsers: dict[StrEnum, CANParser]) -> None:
+  def update_longitudinal_upgrade(self, ret: structs.CarState, ret_sp: structs.CarStateSP, can_parsers: dict[StrEnum, CANParser]) -> None:
     cp_park = can_parsers[Bus.alt]
     cp_adas = can_parsers[Bus.adas]
     cp = can_parsers[Bus.pt]
@@ -45,7 +60,7 @@ class CarStateExt:
       right_scroll = cp_park.vl["WheelButtons_Fwd"]["RightButton_Scroll"]
       if right_scroll != 255:
         if self.distance_button != right_scroll:
-          ret.buttonEvents = [structs.CarState.ButtonEvent(pressed=False, type=ButtonType.gapAdjustCruise)]
+          _append_button_event(ret, pressed=False, button_type=ButtonType.gapAdjustCruise)
         self.distance_button = right_scroll
 
       # button logic for set-speed
@@ -75,11 +90,13 @@ class CarStateExt:
       if not ret.cruiseState.enabled:
         self.set_speed = ret.vEgoCluster
 
-      # VDM_UserAdasRequest: 0=IDLE, 1=UP_1, 2=UP_2, 3=DOWN_1, 4=DOWN_2
-      stalk_down = int(cp.vl["VDM_AdasSts"]["VDM_UserAdasRequest"]) in (3, 4)
+      # VDM_UserAdasRequest: 0=IDLE, 1=UP_1, 2=UP_2, 3=DOWN_1, 4=DOWN_2.
+      # UP_2 → ButtonEvent.cancel is handled in update() unconditionally; here
+      # we only consume DOWN_1/DOWN_2 for set-speed-on-first-stalk-down.
+      adas_vals = list(cp.vl_all["VDM_AdasSts"]["VDM_UserAdasRequest"]) or [self.prev_user_adas_req]
+      stalk_down = any(v in (3, 4) for v in adas_vals)
       self.stalk_down_counter = self.stalk_down_counter + 1 if stalk_down else 0
-      if self.stalk_down_counter == 50:
-        # Mimic Rivian ACC: holding stalk 0.5s sets speed to current speed (never decreases)
+      if self.stalk_down_counter == 1:
         self.set_speed = max(self.set_speed, ret.vEgoCluster)
 
       self.set_speed = max(MIN_SET_SPEED, min(self.set_speed, MAX_SET_SPEED))
@@ -89,9 +106,23 @@ class CarStateExt:
       ret.leftBlindspot = cp_park.vl["BSM_BlindSpotIndicator_Fwd"]["BSM_BlindSpotIndicator_Left"] != 0
       ret.rightBlindspot = cp_park.vl["BSM_BlindSpotIndicator_Fwd"]["BSM_BlindSpotIndicator_Right"] != 0
 
-  def update(self, ret: structs.CarState, can_parsers: dict[StrEnum, CANParser]) -> None:
+  def update(self, ret: structs.CarState, ret_sp: structs.CarStateSP, can_parsers: dict[StrEnum, CANParser]) -> None:
+    # UP_2 → ButtonEvent.cancel runs unconditionally for all Rivians; stock-cruise
+    # (op-long=False) users need to disengage too. VDM_UserAdasRequest is on
+    # Bus.pt (always parsed). Do NOT re-gate on LONGITUDINAL_HARNESS_UPGRADE.
+    cp = can_parsers[Bus.pt]
+    # vl_all (not vl): UP_2 fires for one CAN frame at 50Hz; vl drops it when the
+    # tick's last sample is IDLE. Empty-list fallback to prev (not cp.vl) avoids
+    # spurious edges from stale vl on parser ticks with no new frames.
+    vals = list(cp.vl_all["VDM_AdasSts"]["VDM_UserAdasRequest"]) or [self.prev_user_adas_req]
+    if self.prev_user_adas_req != 2 and 2 in vals:
+      _append_button_event(ret, pressed=True, button_type=ButtonType.cancel)
+    self.prev_user_adas_req = int(vals[-1])
+
+    # update_longitudinal_upgrade runs second and may also append to
+    # ret.buttonEvents (gapAdjustCruise on scroll-wheel delta).
     if self.CP_SP.flags & RivianFlagsSP.LONGITUDINAL_HARNESS_UPGRADE:
-      self.update_longitudinal_upgrade(ret, can_parsers)
+      self.update_longitudinal_upgrade(ret, ret_sp, can_parsers)
 
   @staticmethod
   def get_parser(CP, CP_SP) -> dict[StrEnum, CANParser]:
