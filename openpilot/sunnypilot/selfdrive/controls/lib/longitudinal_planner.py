@@ -5,7 +5,7 @@ This file is part of sunnypilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 """
 
-from openpilot.cereal import messaging, custom
+from openpilot.cereal import log, messaging, custom
 from openpilot.common.params import Params
 from openpilot.common.realtime import DT_MDL
 from opendbc.car import structs
@@ -51,6 +51,7 @@ class LongitudinalPlannerSP:
     self.params_va = Params()
     self.va_frame = -1
     self.very_aggressive = self.params_va.get_bool("VeryAggressivePersonality")
+    self.very_aggressive_active = False  # toggle AND personality==aggressive; what gets published
 
   def is_e2e(self, sm: messaging.SubMaster) -> bool:
     experimental_mode = sm['selfdriveState'].experimentalMode
@@ -118,9 +119,19 @@ class LongitudinalPlannerSP:
     if self.va_frame % int(PARAMS_UPDATE_PERIOD_VA / DT_MDL) == 0:
       self.very_aggressive = self.params_va.get_bool("VeryAggressivePersonality")
 
-  def very_aggressive_overrides(self) -> tuple[float | None, float | None]:
-    """(jerk_factor, t_follow) to force into the MPC, or (None, None) to leave stock behaviour."""
-    if self.very_aggressive:
+  def very_aggressive_overrides(self, personality) -> tuple[float | None, float | None]:
+    """(jerk_factor, t_follow) to force into the MPC, or (None, None) to leave stock behaviour.
+
+    Very Aggressive is a REPLACEMENT for Aggressive, not a modifier layered over whatever
+    personality is selected. On the pre-cutover branch it was a fourth mutually-exclusive
+    LongitudinalPersonality ordinal, and the UI string and the custom.capnp comment both
+    say it applies on top of Aggressive. Applying it while the driver has asked for Relaxed
+    would give a 0.8s follow to someone who explicitly requested more space, with the UI,
+    the personalityChanged alert and the logged `personality` all still reading Relaxed.
+    """
+    active = self.very_aggressive and personality == log.LongitudinalPersonality.aggressive
+    self.very_aggressive_active = bool(active)
+    if active:
       return VERY_AGGRESSIVE_JERK_FACTOR, VERY_AGGRESSIVE_T_FOLLOW
     return None, None
 
@@ -143,7 +154,9 @@ class LongitudinalPlannerSP:
     # Fork field: the mainline `personality` reports `aggressive` while this is set.
     # Publishing it is what makes the Step 4 round-trip criterion (c) falsifiable rather
     # than circular -- without it, replay cannot distinguish Very Aggressive from aggressive.
-    longitudinalPlanSP.veryAggressive = bool(self.very_aggressive)
+    # This is the APPLIED state (toggle on AND personality == aggressive), not the raw
+    # toggle, so the field means "this frame actually used the Very Aggressive tuning".
+    longitudinalPlanSP.veryAggressive = bool(self.very_aggressive_active)
 
     # Dynamic Experimental Control
     dec = longitudinalPlanSP.dec
