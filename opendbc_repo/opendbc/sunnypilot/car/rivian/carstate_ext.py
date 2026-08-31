@@ -54,37 +54,69 @@ class CarStateExt:
     self._prev_stalk_down: bool = False
     self._frames_since_acc_on: int = 0
 
+  @staticmethod
+  def _stalk_samples(cp: CANParser) -> list[int]:
+    """Every VDM_UserAdasRequest value received this cycle, oldest first.
+
+    card.py drains the CAN socket and hands the whole batch to CI.update() in one call, so
+    cp.vl latches only the LAST value per address. A stalk transition that begins and ends
+    inside one drained batch is therefore invisible to cp.vl -- the class of bug that hid
+    UP_2 presses. cp.vl_all keeps every sample in the batch, so edges cannot be swallowed
+    no matter how many messages the device coalesces under load.
+
+    Use this for EDGE detection only. Level/hold logic (the resume counter) must keep
+    reading cp.vl, which is the current state -- see update_longitudinal_upgrade.
+
+    Returns [] when no frame arrived this cycle, which correctly means "no transition".
+
+    Two traps, both silent:
+      - cp.vl_all is a plain dict and VDM_AdasSts is registered LAZILY (both Rivian parser
+        factories pass an empty message list), so this KeyErrors unless a cp.vl read for the
+        same message happened first. carstate.py reads cp.vl["VDM_AdasSts"] and then
+        cp.vl_all["VDM_AdasSts"] before calling CarStateExt.update(), so registration is
+        already guaranteed by the time we get here. Deliberately not adding a static parser
+        entry: declaring a frequency changes can_valid/timeout behaviour, and canValid is
+        safety-relevant.
+      - cp.vl_all[msg] is a defaultdict(list), so a MISSPELLED signal name returns [] rather
+        than raising -- it would look like "no stalk activity, ever" and pass every test.
+    """
+    return [int(v) for v in cp.vl_all["VDM_AdasSts"]["VDM_UserAdasRequest"]]
+
   def update_stalk_controls(self, ret: structs.CarState, can_parsers: dict[StrEnum, CANParser]) -> list:
     cp = can_parsers[Bus.pt]
-    vdm = int(cp.vl["VDM_AdasSts"]["VDM_UserAdasRequest"])
 
     button_events = []
 
-    # Emit the deferred lkas event only if the current frame is not UP_2.
-    # This 1-frame lookahead prevents the CAN transition through UP_1 on the
-    # way to UP_2 from accidentally engaging or changing MADS state.
-    if self._lkas_pending:
-      if vdm != 2:
-        button_events.append(structs.CarState.ButtonEvent(pressed=True, type=ButtonType.lkas))
-      self._lkas_pending = False
+    # Every sample in this cycle's batch, not just the last one cp.vl would expose.
+    # All of the logic below is edge detection against self.vdm_user_adas_request, so it
+    # must run once per sample or a transition inside the batch is lost.
+    for vdm in self._stalk_samples(cp):
+      # Emit the deferred lkas event only if the current frame is not UP_2.
+      # This 1-frame lookahead prevents the CAN transition through UP_1 on the
+      # way to UP_2 from accidentally engaging or changing MADS state.
+      if self._lkas_pending:
+        if vdm != 2:
+          button_events.append(structs.CarState.ButtonEvent(pressed=True, type=ButtonType.lkas))
+        self._lkas_pending = False
 
-    # UP_1 rising edge (from IDLE or DOWN only, not from UP_2 release).
-    # In DISENGAGE mode with ACC active, suppress: UP_1 cancels Rivian ACC natively
-    # and pcmDisable is stripped by mads.update_events(), leaving MADS in Mode B.
-    # Generating lkas here would also fire manualSteeringRequired and kill MADS.
-    if vdm == 1 and self.vdm_user_adas_request not in (1, 2):
-      if not (self.steering_mode_on_brake == MadsSteeringModeOnBrake.DISENGAGE and ret.cruiseState.enabled):
-        self._lkas_pending = True
+      # UP_1 rising edge (from IDLE or DOWN only, not from UP_2 release).
+      # In DISENGAGE mode with ACC active, suppress: UP_1 cancels Rivian ACC natively
+      # and pcmDisable is stripped by mads.update_events(), leaving MADS in Mode B.
+      # Generating lkas here would also fire manualSteeringRequired and kill MADS.
+      if vdm == 1 and self.vdm_user_adas_request not in (1, 2):
+        if not (self.steering_mode_on_brake == MadsSteeringModeOnBrake.DISENGAGE and ret.cruiseState.enabled):
+          self._lkas_pending = True
 
-    # Signal UP_2 state via altButton2 so car_specific.py can fire lkasDisable
-    # and suppress pcmEnable. UP_2 disengages ACC; without this, MADS can persist
-    # in Mode B (lateral only) after ACC cancels.
-    if vdm == 2 and self.vdm_user_adas_request != 2:
-      button_events.append(structs.CarState.ButtonEvent(pressed=True, type=ButtonType.altButton2))
-    elif vdm != 2 and self.vdm_user_adas_request == 2:
-      button_events.append(structs.CarState.ButtonEvent(pressed=False, type=ButtonType.altButton2))
+      # Signal UP_2 state via altButton2 so car_specific.py can fire lkasDisable
+      # and suppress pcmEnable. UP_2 disengages ACC; without this, MADS can persist
+      # in Mode B (lateral only) after ACC cancels.
+      if vdm == 2 and self.vdm_user_adas_request != 2:
+        button_events.append(structs.CarState.ButtonEvent(pressed=True, type=ButtonType.altButton2))
+      elif vdm != 2 and self.vdm_user_adas_request == 2:
+        button_events.append(structs.CarState.ButtonEvent(pressed=False, type=ButtonType.altButton2))
 
-    self.vdm_user_adas_request = vdm
+      self.vdm_user_adas_request = vdm
+
     return button_events
 
   def update_longitudinal_upgrade(self, ret: structs.CarState, can_parsers: dict[StrEnum, CANParser]) -> list:
@@ -129,9 +161,16 @@ class CarStateExt:
           self.set_speed -= conversion
 
       # VDM_UserAdasRequest: 0=IDLE, 1=UP_1, 2=UP_2, 3=DOWN_1, 4=DOWN_2
-      vdm_request = int(cp.vl["VDM_AdasSts"]["VDM_UserAdasRequest"])
-      stalk_down2 = vdm_request == 4
-      stalk_down = vdm_request in (3, 4)
+      #
+      # Two different semantics are taken off this one signal and they must not be conflated:
+      #   LEVEL  - cp.vl, the current detent. Drives the resume hold counter below, which
+      #            counts CI.update() calls and fires at exactly 50. Feeding that from
+      #            cp.vl_all would make it tick per CAN frame and silently redefine "50".
+      #   EDGE   - cp.vl_all, every sample this cycle. Drives resume arming and the set-speed
+      #            snap, which would miss a transition that starts and ends inside one
+      #            drained CAN batch if they only saw the latched value.
+      stalk_level = int(cp.vl["VDM_AdasSts"]["VDM_UserAdasRequest"])
+      stalk_down2 = stalk_level == 4
 
       # Save set speed on ACC deactivation (before vEgoCluster reset so value is intact)
       if self._resume_enabled:
@@ -140,36 +179,46 @@ class CarStateExt:
           self._resume_eligible = False
           self._resume_acc_counter = 0
 
-      # Arm resume only on ACC rising edge while DOWN_2 is held
+      # Arm resume on the ACC rising edge while DOWN_2 is held. This one is a CRUISE edge
+      # gated on the stalk LEVEL, so it stays per-tick.
       if self._resume_enabled:
         if not self._prev_cruise_enabled and ret.cruiseState.enabled and stalk_down2:
-          self._resume_eligible = True
-        # Also arm on DOWN_2 rising edge within ~100ms of ACC activation: handles the case
-        # where the stalk transitions through DOWN_1 before reaching DOWN_2 (~40-50ms delay
-        # observed in logs), so ACC activates while the stalk is still in DOWN_1 detent.
-        elif (ret.cruiseState.enabled and not self._prev_stalk_down2 and stalk_down2
-              and not self._resume_eligible and self._frames_since_acc_on < 10):
-          self._resume_eligible = True
-        # Also arm on first DOWN_2 press while ACC is on and speed is below minimum: handles
-        # stop-and-go where ACC has been engaged continuously (frames_since_acc_on > 10) and
-        # the driver presses DOWN_2 to resume to a previously set higher speed.
-        elif (ret.cruiseState.enabled and not self._prev_stalk_down2 and stalk_down2
-              and ret.vEgoCluster < MIN_SET_SPEED and not self._resume_eligible):
           self._resume_eligible = True
 
       if not ret.cruiseState.enabled:
         self.set_speed = ret.vEgoCluster
 
-      if stalk_down and not self._prev_stalk_down and not self._resume_eligible:
-        # Mimic Rivian ACC: tapping stalk down snaps set speed to current speed (never decreases)
-        self.set_speed = max(self.set_speed, ret.vEgoCluster)
+      # Everything below is driven by a STALK edge, so it runs once per sample.
+      for sample in self._stalk_samples(cp):
+        sample_down2 = sample == 4
+        sample_down = sample in (3, 4)
+
+        if self._resume_enabled:
+          # Arm on DOWN_2 rising edge within ~100ms of ACC activation: handles the case
+          # where the stalk transitions through DOWN_1 before reaching DOWN_2 (~40-50ms delay
+          # observed in logs), so ACC activates while the stalk is still in DOWN_1 detent.
+          if (ret.cruiseState.enabled and not self._prev_stalk_down2 and sample_down2
+              and not self._resume_eligible and self._frames_since_acc_on < 10):
+            self._resume_eligible = True
+          # Arm on first DOWN_2 press while ACC is on and speed is below minimum: handles
+          # stop-and-go where ACC has been engaged continuously (frames_since_acc_on > 10) and
+          # the driver presses DOWN_2 to resume to a previously set higher speed.
+          elif (ret.cruiseState.enabled and not self._prev_stalk_down2 and sample_down2
+                and ret.vEgoCluster < MIN_SET_SPEED and not self._resume_eligible):
+            self._resume_eligible = True
+
+        if sample_down and not self._prev_stalk_down and not self._resume_eligible:
+          # Mimic Rivian ACC: tapping stalk down snaps set speed to current speed (never decreases)
+          self.set_speed = max(self.set_speed, ret.vEgoCluster)
+
+        self._prev_stalk_down2 = sample_down2
+        self._prev_stalk_down = sample_down
 
       self._prev_cruise_enabled = ret.cruiseState.enabled
-      self._prev_stalk_down2 = stalk_down2
-      self._prev_stalk_down = stalk_down
       self._frames_since_acc_on = (self._frames_since_acc_on + 1) if ret.cruiseState.enabled else 0
 
-      # Resume: count consecutive frames where ACC is on and DOWN_2 is held after arming
+      # Resume: count consecutive CI.update() calls where ACC is on and DOWN_2 is held after
+      # arming. Uses the LEVEL, so 50 keeps meaning 50 ticks regardless of CAN batching.
       if self._resume_enabled and self._resume_eligible and ret.cruiseState.enabled and stalk_down2:
         self._resume_acc_counter += 1
       else:
