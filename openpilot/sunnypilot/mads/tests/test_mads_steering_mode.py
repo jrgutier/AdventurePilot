@@ -213,13 +213,23 @@ class TestLateralMismatchCounter:
 # brand restrictions
 
 class TestBrandSteeringModeRestrictions:
-  def test_rivian_forced_to_disengage(self, mocker):
+  def test_rivian_gets_the_full_steering_mode_choice(self, mocker):
+    """Rivian is deliberately NOT in the limited-brands list (helpers.py get_mads_limited_brands).
+
+    Upstream restricts it to DISENGAGE-only; this fork's Rivian MADS port has consistent
+    engage/disengage signals, so the driver keeps all three modes. This test used to assert
+    the upstream behaviour and had been failing ever since Rivian was removed from that list,
+    which meant the whole MADS suite was permanently red and could not signal a real
+    regression. Inverted rather than deleted so that re-adding Rivian to the limited list
+    fails here instead of silently taking the choice away from the driver.
+    """
     CP = structs.CarParams()
     CP.brand = "rivian"
     CP_SP = structs.CarParamsSP()
     params = mocker.MagicMock()
-    assert read_steering_mode_param(CP, CP_SP, params) == MadsSteeringModeOnBrake.DISENGAGE
-    params.get.assert_not_called()
+    params.get.return_value = MadsSteeringModeOnBrake.PAUSE
+    assert read_steering_mode_param(CP, CP_SP, params) == MadsSteeringModeOnBrake.PAUSE
+    params.get.assert_called()
 
   def test_tesla_without_vehicle_bus_forced_to_disengage(self, mocker):
     CP = structs.CarParams()
