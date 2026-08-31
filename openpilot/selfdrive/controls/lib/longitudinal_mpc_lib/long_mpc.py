@@ -59,7 +59,13 @@ CRUISE_MIN_ACCEL = -1.2
 CRUISE_MAX_ACCEL = 1.6
 MIN_X_LEAD_FACTOR = 0.5
 
-def get_jerk_factor(personality=log.LongitudinalPersonality.standard):
+def get_jerk_factor(personality=log.LongitudinalPersonality.standard, jerk_factor_override=None):
+  # Callers pass the override in; this function must stay free of Params reads. It runs on every
+  # plannerd iteration via set_weights (20 Hz), and get_T_FOLLOW below is additionally called at
+  # module scope during solver construction, so a filesystem read here would land in the MPC hot
+  # path and break process_replay determinism.
+  if jerk_factor_override is not None:
+    return jerk_factor_override
   if personality==log.LongitudinalPersonality.relaxed:
     return 1.0
   elif personality==log.LongitudinalPersonality.standard:
@@ -70,7 +76,9 @@ def get_jerk_factor(personality=log.LongitudinalPersonality.standard):
     raise NotImplementedError("Longitudinal personality not supported")
 
 
-def get_T_FOLLOW(personality=log.LongitudinalPersonality.standard):
+def get_T_FOLLOW(personality=log.LongitudinalPersonality.standard, t_follow_override=None):
+  if t_follow_override is not None:
+    return t_follow_override
   if personality==log.LongitudinalPersonality.relaxed:
     return 1.75
   elif personality==log.LongitudinalPersonality.standard:
@@ -263,8 +271,9 @@ class LongitudinalMpc:
     for i in range(N):
       self.solver.cost_set(i, 'Zl', Zl)
 
-  def set_weights(self, prev_accel_constraint=True, personality=log.LongitudinalPersonality.standard):
-    jerk_factor = get_jerk_factor(personality)
+  def set_weights(self, prev_accel_constraint=True, personality=log.LongitudinalPersonality.standard,
+                  jerk_factor_override=None):
+    jerk_factor = get_jerk_factor(personality, jerk_factor_override)
     a_change_cost = A_CHANGE_COST if prev_accel_constraint else 0
     cost_weights = [X_EGO_OBSTACLE_COST, X_EGO_COST, V_EGO_COST, A_EGO_COST, jerk_factor * a_change_cost, jerk_factor * J_EGO_COST]
     constraint_cost_weights = [LIMIT_COST, LIMIT_COST, LIMIT_COST, DANGER_ZONE_COST]
@@ -309,8 +318,9 @@ class LongitudinalMpc:
     lead_xv = self.extrapolate_lead(x_lead, v_lead, a_lead, a_lead_tau)
     return lead_xv
 
-  def update(self, radarstate, v_cruise, personality=log.LongitudinalPersonality.standard):
-    t_follow = get_T_FOLLOW(personality)
+  def update(self, radarstate, v_cruise, personality=log.LongitudinalPersonality.standard,
+             t_follow_override=None):
+    t_follow = get_T_FOLLOW(personality, t_follow_override)
     v_ego = self.x0[1]
 
     lead_xv_0 = self.process_lead(radarstate.leadOne)

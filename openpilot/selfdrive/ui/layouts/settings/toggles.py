@@ -22,6 +22,10 @@ DESCRIPTIONS = {
     "Your attention is required at all times to use this feature."
   ),
   "DisengageOnAccelerator": tr_noop("When enabled, pressing the accelerator pedal will disengage sunnypilot."),
+  "VeryAggressivePersonality": tr_noop(
+    "Follow closer and react harder than Aggressive (jerk factor 0.3, follow time 0.8s). " +
+    "Applies on top of the Aggressive personality; logs report Aggressive with a separate " +
+    "veryAggressive flag."),
   "LongitudinalPersonality": tr_noop(
     "Standard is recommended. In aggressive mode, sunnypilot will follow lead cars closer and be more aggressive with the gas and brake. " +
     "In relaxed mode sunnypilot will stay further away from lead cars. On supported cars, you can cycle through these personalities with " +
@@ -55,6 +59,12 @@ class TogglesLayout(Widget):
       "ExperimentalMode": (
         lambda: tr("Experimental Mode"),
         "",
+        "experimental_white.png",
+        False,
+      ),
+      "VeryAggressivePersonality": (
+        lambda: tr("Very Aggressive Personality"),
+        DESCRIPTIONS["VeryAggressivePersonality"],
         "experimental_white.png",
         False,
       ),

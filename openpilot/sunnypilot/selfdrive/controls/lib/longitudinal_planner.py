@@ -6,6 +6,8 @@ See the LICENSE.md file in the root directory for more details.
 """
 
 from openpilot.cereal import messaging, custom
+from openpilot.common.params import Params
+from openpilot.common.realtime import DT_MDL
 from opendbc.car import structs
 from openpilot.common.constants import CV
 from openpilot.selfdrive.car.cruise import V_CRUISE_MAX
@@ -16,6 +18,13 @@ from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit.speed_limit_assist 
 from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit.speed_limit_resolver import SpeedLimitResolver
 from openpilot.sunnypilot.selfdrive.selfdrived.events import EventsSP
 from openpilot.sunnypilot.models.helpers import get_active_bundle
+
+# Very Aggressive longitudinal personality (fork extension).
+# Tuning is the net state of 84e5ea0de6 -> 5f67a9c058 -> 620419dae0: fixed constants, not the
+# speed-dependent variant, which 5f67a9c058 reverted.
+VERY_AGGRESSIVE_JERK_FACTOR = 0.3
+VERY_AGGRESSIVE_T_FOLLOW = 0.8
+PARAMS_UPDATE_PERIOD_VA = 5.0   # seconds; matches the SP toggle-refresh idiom
 
 DecState = custom.LongitudinalPlanSP.DynamicExperimentalControl.DynamicExperimentalControlState
 LongitudinalPlanSource = custom.LongitudinalPlanSP.LongitudinalPlanSource
@@ -35,6 +44,13 @@ class LongitudinalPlannerSP:
 
     self.output_v_target = 0.
     self.output_a_target = 0.
+
+    # Very Aggressive: cached toggle, refreshed on the same slow cadence the other SP toggles
+    # use (see lateral_load_governor._update_params). Never read per frame -- the value feeds
+    # the MPC weights at 20 Hz.
+    self.params_va = Params()
+    self.va_frame = -1
+    self.very_aggressive = self.params_va.get_bool("VeryAggressivePersonality")
 
   def is_e2e(self, sm: messaging.SubMaster) -> bool:
     experimental_mode = sm['selfdriveState'].experimentalMode
@@ -97,8 +113,20 @@ class LongitudinalPlannerSP:
       self.output_a_target *= self.scc.governor.throttle_scale()
     return self.output_v_target, self.output_a_target
 
+  def update_very_aggressive_param(self) -> None:
+    self.va_frame += 1
+    if self.va_frame % int(PARAMS_UPDATE_PERIOD_VA / DT_MDL) == 0:
+      self.very_aggressive = self.params_va.get_bool("VeryAggressivePersonality")
+
+  def very_aggressive_overrides(self) -> tuple[float | None, float | None]:
+    """(jerk_factor, t_follow) to force into the MPC, or (None, None) to leave stock behaviour."""
+    if self.very_aggressive:
+      return VERY_AGGRESSIVE_JERK_FACTOR, VERY_AGGRESSIVE_T_FOLLOW
+    return None, None
+
   def update(self, sm: messaging.SubMaster) -> None:
     self.events_sp.clear()
+    self.update_very_aggressive_param()
     self.dec.update(sm)
     self.e2e_alerts_helper.update(sm, self.events_sp)
 
@@ -112,6 +140,10 @@ class LongitudinalPlannerSP:
     longitudinalPlanSP.vTarget = float(self.output_v_target)
     longitudinalPlanSP.aTarget = float(self.output_a_target)
     longitudinalPlanSP.events = self.events_sp.to_msg()
+    # Fork field: the mainline `personality` reports `aggressive` while this is set.
+    # Publishing it is what makes the Step 4 round-trip criterion (c) falsifiable rather
+    # than circular -- without it, replay cannot distinguish Very Aggressive from aggressive.
+    longitudinalPlanSP.veryAggressive = bool(self.very_aggressive)
 
     # Dynamic Experimental Control
     dec = longitudinalPlanSP.dec
