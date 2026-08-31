@@ -117,7 +117,7 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     if force_slow_decel:
       v_cruise = 0.0
 
-    jerk_override, t_follow_override = LongitudinalPlannerSP.very_aggressive_overrides(self, sm['selfdriveState'].personality)
+    jerk_override, t_follow_override = LongitudinalPlannerSP.very_aggressive_overrides(self)
     self.mpc.set_weights(prev_accel_constraint, personality=sm['selfdriveState'].personality,
                          jerk_factor_override=jerk_override)
     self.mpc.set_cur_state(self.v_desired_filter.x, self.a_desired)

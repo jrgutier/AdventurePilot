@@ -23,9 +23,9 @@ DESCRIPTIONS = {
   ),
   "DisengageOnAccelerator": tr_noop("When enabled, pressing the accelerator pedal will disengage sunnypilot."),
   "VeryAggressivePersonality": tr_noop(
-    "Follow closer and react harder than Aggressive (jerk factor 0.3, follow time 0.8s). " +
-    "Applies on top of the Aggressive personality; logs report Aggressive with a separate " +
-    "veryAggressive flag."),
+    "Replaces the Aggressive personality's tuning (jerk factor 0.3, follow time 0.8s). " +
+    "Has no effect unless the Aggressive personality is selected. Logs report Aggressive " +
+    "with a separate veryAggressive flag."),
   "LongitudinalPersonality": tr_noop(
     "Standard is recommended. In aggressive mode, sunnypilot will follow lead cars closer and be more aggressive with the gas and brake. " +
     "In relaxed mode sunnypilot will stay further away from lead cars. On supported cars, you can cycle through these personalities with " +

@@ -208,6 +208,10 @@ struct LongitudinalPlanSP @0xf35cc4560bbf6ec2 {
   # ordinal would conflict on every upstream sync AND be unreadable to tooling built against
   # upstream cereal. This fork field carries the extra state alongside the mainline
   # `personality`, which reports `aggressive` when this is set.
+  # TRUE ONLY WHEN THE TUNING WAS ACTUALLY APPLIED THIS FRAME (toggle enabled AND
+  # personality == aggressive), not the raw toggle state -- Very Aggressive replaces the
+  # Aggressive personality rather than layering on top of whichever one is selected, so the
+  # toggle is inert outside Aggressive and its raw state is not observable here.
   veryAggressive @8 :Bool;
 
   struct DynamicExperimentalControl {

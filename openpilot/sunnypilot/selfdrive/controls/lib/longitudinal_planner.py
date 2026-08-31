@@ -119,25 +119,36 @@ class LongitudinalPlannerSP:
     if self.va_frame % int(PARAMS_UPDATE_PERIOD_VA / DT_MDL) == 0:
       self.very_aggressive = self.params_va.get_bool("VeryAggressivePersonality")
 
-  def very_aggressive_overrides(self, personality) -> tuple[float | None, float | None]:
-    """(jerk_factor, t_follow) to force into the MPC, or (None, None) to leave stock behaviour.
+  def update_very_aggressive_active(self, personality: int) -> None:
+    """Decide whether the Very Aggressive tuning applies THIS frame.
 
     Very Aggressive is a REPLACEMENT for Aggressive, not a modifier layered over whatever
     personality is selected. On the pre-cutover branch it was a fourth mutually-exclusive
-    LongitudinalPersonality ordinal, and the UI string and the custom.capnp comment both
-    say it applies on top of Aggressive. Applying it while the driver has asked for Relaxed
-    would give a 0.8s follow to someone who explicitly requested more space, with the UI,
-    the personalityChanged alert and the logged `personality` all still reading Relaxed.
+    LongitudinalPersonality ordinal, and both the UI string and the custom.capnp comment
+    describe it as applying to Aggressive. Applying it while the driver has asked for
+    Relaxed would give a 0.8s follow to someone who explicitly requested more space, with
+    the UI, the personalityChanged alert and the logged `personality` all reading Relaxed.
+
+    Computed here, in update(), rather than as a side effect of very_aggressive_overrides()
+    so that the write and the read in publish_longitudinal_plan_sp() both live in this
+    fork-owned file. The trigger previously sat in the upstream-tracked planner, which
+    conflicts on every comma sync; if a sync ever guarded that call the published field
+    would have silently frozen at the previous frame's value with nothing failing.
     """
-    active = self.very_aggressive and personality == log.LongitudinalPersonality.aggressive
-    self.very_aggressive_active = bool(active)
-    if active:
+    self.very_aggressive_active = bool(
+      self.very_aggressive and personality == log.LongitudinalPersonality.aggressive
+    )
+
+  def very_aggressive_overrides(self) -> tuple[float | None, float | None]:
+    """(jerk_factor, t_follow) to force into the MPC, or (None, None) to leave stock behaviour."""
+    if self.very_aggressive_active:
       return VERY_AGGRESSIVE_JERK_FACTOR, VERY_AGGRESSIVE_T_FOLLOW
     return None, None
 
   def update(self, sm: messaging.SubMaster) -> None:
     self.events_sp.clear()
     self.update_very_aggressive_param()
+    self.update_very_aggressive_active(sm['selfdriveState'].personality)
     self.dec.update(sm)
     self.e2e_alerts_helper.update(sm, self.events_sp)
 
@@ -156,6 +167,7 @@ class LongitudinalPlannerSP:
     # than circular -- without it, replay cannot distinguish Very Aggressive from aggressive.
     # This is the APPLIED state (toggle on AND personality == aggressive), not the raw
     # toggle, so the field means "this frame actually used the Very Aggressive tuning".
+    # The raw toggle state is deliberately NOT observable in logs on non-aggressive frames.
     longitudinalPlanSP.veryAggressive = bool(self.very_aggressive_active)
 
     # Dynamic Experimental Control
